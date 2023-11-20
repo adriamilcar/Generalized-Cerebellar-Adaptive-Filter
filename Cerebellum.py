@@ -8,16 +8,19 @@ class Cerebellum(object):
 
     # Creates a Module composed of Alpha-like filters with different temporal profiles.
     def __init__(self, dt=0.01, nInputs=1, nOutputs=1, nPCpop=10, nIndvBasis=50, nSharedBasis=200, beta_MF=1e-3, beta_PF=1e-6, 
-                 range_delays=[0.05, 0.5], range_TC=[0.05, 2.], range_scaling=[1, 100], range_W=[0., 1.]):
+                 range_delays=[0.05, 0.5], range_TC=[0.05, 2.], range_scaling=[1, 100], range_W=[0., 1.], parallel_channels=False):
 
         # Basic parameters.
         self.dt = dt
         self.nInputs = nInputs
         self.nIndvBasis = nIndvBasis
         self.nSharedBasis = nSharedBasis
+        self.parallel_channels = parallel_channels
+        if self.parallel_channels:
+            self.nSharedBasis = nSharedBasis   # if parallel_channels=True, then it overrides the nSharedBasis parameter to force it to become 0.
+        self.nBasis = (self.nInputs*self.nIndvBasis) + self.nSharedBasis
         self.nOutputs = nOutputs
         self.nPCpop = nPCpop
-        self.nBasis = (self.nInputs*self.nIndvBasis) + self.nSharedBasis
         self.nPC = self.nPCpop*self.nOutputs
         self.range_delays = range_delays
         delays = np.linspace(self.range_delays[0], self.range_delays[1], self.nPCpop)              
@@ -49,7 +52,17 @@ class Cerebellum(object):
         self.mask_wMF = np.column_stack((np.zeros((self.nInputs, int(self.nInputs*self.nIndvBasis))), np.ones((self.nInputs, self.nSharedBasis))))
 
         # Parallel fiber synpases: a population of heterogeneous delay-tuned Purkinje cells for each output channel (deep nucleus).
-        self.w_PF = np.zeros(self.nBasis*self.nPC).reshape((self.nBasis, self.nPC)) 
+        self.w_PF = np.zeros(self.nBasis*self.nPC).reshape((self.nBasis, self.nPC))
+        self.mask_wPF = np.ones_like(self.w_PF)
+        if self.parallel_channels:
+            self.mask_wPF = self.build_wPF_mask()
+
+    def build_wPF_mask(self):
+        mask_wPF = np.copy(self.w_PF)
+        for i in np.arange(self.nInputs):
+            mask_wPF[int(i*self.nIndvBasis):int((i+1)*self.nIndvBasis), int(i*self.nPCpop):int((i+1)*self.nPCpop)] = np.ones(self.nIndvBasis*self.nPCpop).reshape((self.nIndvBasis, self.nPCpop))
+
+        return mask_wPF
 
     def create_basisFunctions(self):
 
@@ -86,7 +99,7 @@ class Cerebellum(object):
         if update:
             # Update PF synapses based on granule eligibility traces and climbing fiber signal (error).
             eligibility_traces = self.p_buffer[:, self.indxs_delays]
-            CF = np.repeat(error.reshape((self.nOutputs, 1)), self.nBasis, axis=1).repeat(self.nPCpop, axis=0).T   # Climbing fiber teaching signal. (shape(error)[0]==self.nOutputs).
+            CF = np.repeat(error.reshape((self.nOutputs, 1)), self.nBasis, axis=1).repeat(self.nPCpop, axis=0).T * self.mask_wPF  # Climbing fiber teaching signal. (shape(error)[0]==self.nOutputs).
             self.w_PF += self.beta_PF * CF * eligibility_traces
 
             # Update MF synapses based on Oja's rule (stable Hebbian). Right now only the shared basis are updated ('mask_wMF').
@@ -202,7 +215,7 @@ class FeedbackLoop(object):
 class CerebellarAgent(object):
     # Creates and agent composed of a feedback loop (inverted pendulum driven by a PD controller) and a feedforward module steering the feedback controller.
     def __init__(self, mass=67., height=0.85, dt=0.01, pd_gains=[1250., 250.], feedback_delay=0.1, nInputs=1, nOutputs=1, nPCpop=10, nIndvBasis=50, nSharedBasis=200, 
-                 beta_MF=1e-3, beta_PF=1e-6, range_delays=[0.05, 0.5], range_TC=[0.05, 2.], range_scaling=[1, 100], range_W=[0., 1.]):
+                 beta_MF=1e-3, beta_PF=1e-6, range_delays=[0.05, 0.5], range_TC=[0.05, 2.], range_scaling=[1, 100], range_W=[0., 1.], parallel_channels=False):
 
         self.type = type                     # HSPC, PSPC, or FEL.
         self.mass = mass                     # Mass of the Inverted Pendulum (in kilograms).
@@ -224,8 +237,8 @@ class CerebellarAgent(object):
         self.range_W = range_W
         self.error = np.array([0.])
 
-        self.ff = Cerebellum(dt=self.dt, nInputs=nInputs, nOutputs=nOutputs, nPCpop=nPCpop, nIndvBasis=nIndvBasis, nSharedBasis=nSharedBasis,
-                             beta_MF=beta_MF, beta_PF=beta_PF, range_delays=range_delays, range_TC=range_TC, range_scaling=range_scaling, range_W=range_W)
+        self.ff = Cerebellum(dt=self.dt, nInputs=nInputs, nOutputs=nOutputs, nPCpop=nPCpop, nIndvBasis=nIndvBasis, nSharedBasis=nSharedBasis, beta_MF=beta_MF, 
+                             beta_PF=beta_PF, range_delays=range_delays, range_TC=range_TC, range_scaling=range_scaling, range_W=range_W, parallel_channels=parallel_channels)
 
         self.fb = FeedbackLoop(mass=self.mass, height=self.height, dt=self.dt, p_gain=self.p_gain, d_gain=self.d_gain, delay=self.feedback_delay)
 
